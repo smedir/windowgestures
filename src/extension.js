@@ -98,6 +98,14 @@ class Manager {
         this._isettings = new Gio.Settings({
             schema: 'org.gnome.desktop.interface'
         });
+
+        // Show Desktop Settings
+        this._mutterSetting = new Gio.Settings({
+            schema: 'org.gnome.wm.keybindings'
+        });
+        this._mutterSettingsID = this._mutterSetting.connect('changed',
+            this._updateMutterSettings.bind(this));
+        this._updateMutterSettings;
     }
 
     // Clear potentially running timeout/interval
@@ -138,6 +146,10 @@ class Manager {
 
         // Release Touchpad Event Capture
         global.stage.disconnect(this._gestureCallbackID);
+
+        if (this._mutterSettingsID)
+            this._mutterSetting.disconnect(this._mutterSettingID);
+        this._mutterSettingID = 0;
 
         // Cleanup virtual devices
         this._virtualTouchpad = null;
@@ -465,6 +477,7 @@ class Manager {
             );
         }
     }
+
     _tick() {
         return new Date().getTime();
     }
@@ -562,6 +575,51 @@ class Manager {
             )
             , this._monitorId
         );
+    }
+
+    // Initialize and store show-desktop settings.
+    _updateMutterSettings() {
+        const key = 'show-desktop'
+        const showDesktopKeybinding = this._mutterSetting.get_strv(key)[0];
+        if (!showDesktopKeybinding) {
+            this._makeupKeybinding(this._mutterSetting, key);
+            return;
+        } else {
+            this._showDesktopKeys = this._extractKeys(showDesktopKeybinding);
+        }
+    }
+
+    _extractKeys(keybinding) {
+        let k = [];
+        k.push(keybinding.charCodeAt(-1));
+        keybinding = keybinding.toLowerCase();
+        if (keybinding.includes('<super>'))
+            k.unshift(Clutter.KEY_Super_L);
+        if (keybinding.includes('alt'))
+            k.unshift(Clutter.KEY_Meta_L);
+        if (keybinding.includes('ctr') ||
+            keybinding.includes('ctrl') ||
+            keybinding.includes('control'))
+                k.unshift(Clutter.KEY_Control_L);
+        if (keybinding.includes('shift' ||
+            keybinding.includes('shft') ||
+            keybinding.includes('shf')))
+                k.unshift(Clutter.KEY_Shift_L);
+        return k;
+    }
+
+    _makeupKeybinding(gioSetting, key, action) {
+        // keys a-Z
+        for (let i = 65; i < 122; i++) {
+            let shortcutMap = global.display.get_keybinding_action(
+                i, Clutter.ModifierType.SUPER_MASK |
+                Clutter.ModifierType.META_MASK);
+            if (shortcutMap === Meta.KeyBindingAction.NONE) {
+                const shorcutKeys= `<Super><Alt>${String.fromCharCode(i)}`;
+                gioSetting.set_strv(key, [shorcutKeys]);
+                break;
+            }
+        }
     }
 
     // Find Target Window
@@ -1873,10 +1931,7 @@ class Manager {
                     // Action is executed
                     if (progress >= 1.0) {
                         // Show Desktop (Super+D)  Clutter.KEY_D
-                        this._sendKeyPress(
-                            [Clutter.KEY_Super_L,
-                            Clutter.KEY_D + _LCASE]
-                        );
+                        this._sendKeyPress(this._showDesktopKeys);
                     }
 
                     ui.forEach((aui) => {
