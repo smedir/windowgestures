@@ -71,11 +71,11 @@ class Manager {
         this._hooked = false;
 
         // Create virtual devices
-        const seat = Clutter.get_default_backend().get_default_seat();
-        this._virtualTouchpad = seat.create_virtual_device(
+        this._defaultSeat = Clutter.get_default_backend().get_default_seat();
+        this._virtualTouchpad = this._defaultSeat.create_virtual_device(
             Clutter.InputDeviceType.POINTER_DEVICE
         );
-        this._virtualKeyboard = seat.create_virtual_device(
+        this._virtualKeyboard = this._defaultSeat.create_virtual_device(
             Clutter.InputDeviceType.KEYBOARD_DEVICE
         );
 
@@ -101,11 +101,11 @@ class Manager {
 
         // Show Desktop Settings
         this._mutterSetting = new Gio.Settings({
-            schema: 'org.gnome.wm.keybindings'
+            schema: 'org.gnome.desktop.wm.keybindings'
         });
-        this._mutterSettingsID = this._mutterSetting.connect('changed',
-            this._updateMutterSettings.bind(this));
-        this._updateMutterSettings;
+        // this._mutterSettingsID = this._mutterSetting.connect('changed',
+        //     this._updateMutterSettings.bind(this));
+        // this._updateMutterSettings();
     }
 
     // Clear potentially running timeout/interval
@@ -484,10 +484,11 @@ class Manager {
 
     _isWindowBlacklist(win) {
         if (win) {
-            if (WindowClassBlacklist.indexOf(win.get_wm_class()) == -1 ||
-                win.get_window_type() === Meta.WindowType.DESKTOP) {
-                return false;
+            if (win.get_window_type() === Meta.WindowType.DESKTOP) {
+                return true;
             }
+            if (WindowClassBlacklist.indexOf(win.get_wm_class()) == -1)
+                return false;
         }
         return true;
     }
@@ -581,45 +582,83 @@ class Manager {
     _updateMutterSettings() {
         const key = 'show-desktop'
         const showDesktopKeybinding = this._mutterSetting.get_strv(key)[0];
+        console.log(showDesktopKeybinding)
         if (!showDesktopKeybinding) {
             this._makeupKeybinding(this._mutterSetting, key);
+            log('making up keys')
             return;
         } else {
             this._showDesktopKeys = this._extractKeys(showDesktopKeybinding);
         }
+        console.log(this._showDesktopKeys)
     }
 
     _extractKeys(keybinding) {
         let k = [];
-        k.push(keybinding.charCodeAt(-1));
+        let modifierType = 0;
+        k.push(keybinding.charCodeAt(keybinding.length - 1));
         keybinding = keybinding.toLowerCase();
-        if (keybinding.includes('<super>'))
+        if (keybinding.includes('<super>')) {
             k.unshift(Clutter.KEY_Super_L);
-        if (keybinding.includes('alt'))
+            modifierType = Clutter.ModifierType.SUPER_MASK;
+        }
+        if (keybinding.includes('alt')) {
             k.unshift(Clutter.KEY_Meta_L);
+            modifierType = modifierType | Clutter.ModifierType.META_MASK;
+        }
         if (keybinding.includes('ctr') ||
             keybinding.includes('ctrl') ||
-            keybinding.includes('control'))
-                k.unshift(Clutter.KEY_Control_L);
+            keybinding.includes('control')) {
+            k.unshift(Clutter.KEY_Control_L);
+            modifierType = modifierType | Clutter.ModifierType.CONTROL_MASK;
+        }
         if (keybinding.includes('shift' ||
             keybinding.includes('shft') ||
-            keybinding.includes('shf')))
-                k.unshift(Clutter.KEY_Shift_L);
+            keybinding.includes('shf'))) {
+            k.unshift(Clutter.KEY_Shift_L);
+            modifierType = modifierType | Clutter.ModifierType.SHIFT_MASK;
+        }
+        k.shift[modifierType];
         return k;
     }
 
-    _makeupKeybinding(gioSetting, key, action) {
+    _makeupKeybinding(gioSetting, key) {
         // keys a-Z
         for (let i = 65; i < 122; i++) {
             let shortcutMap = global.display.get_keybinding_action(
                 i, Clutter.ModifierType.SUPER_MASK |
-                Clutter.ModifierType.META_MASK);
+            Clutter.ModifierType.META_MASK);
             if (shortcutMap === Meta.KeyBindingAction.NONE) {
-                const shorcutKeys= `<Super><Alt>${String.fromCharCode(i)}`;
+                const shorcutKeys = `<Super><Alt>${String.fromCharCode(i)}`;
                 gioSetting.set_strv(key, [shorcutKeys]);
                 break;
             }
         }
+    }
+
+    _sendSyntheticEvent(keyspressed) {
+        const pressedkey = keyspressed[keyspressed.length - 2];
+        const modifierType = keyspressed[keyspressed.length - 1]
+        const seat = this._virtualKeyboard.get_seat();
+        let pressed = true;
+        const pressevent = this._makeNewClutterEvent(pressedkey, modifierType, pressed);
+        this._defaultSeat.post(pressevent);
+        pressed = false;
+        const releaseEvent = this._makeNewClutterEvent(pressedkey, modifierType, pressed);
+        this._defaultSeat.post(releaseEvent);
+    }
+
+    _makeNewClutterEvent(pressedkey, modifierType, pressed) {
+        let eventType;
+        pressed ? eventType = Clutter.EventType.KEY_PRESS :
+            eventType = Clutter.EventType.KEY_RELEASE;
+        let event = Clutter.Event.new(eventType);
+        event.state = modifierType;
+        event.symbol = pressedkey;
+        event.flags = Clutter.EventFlags.FLAG_SYNTHETIC;
+        event.time = Clutter.CURRENT_TIME;
+        event.device = this._virtualKeyboard;
+        return event;
     }
 
     // Find Target Window
@@ -668,10 +707,13 @@ class Manager {
         combination.forEach(key => this._virtualKeyboard.notify_keyval(
             Clutter.get_current_event_time(), key, Clutter.KeyState.PRESSED)
         );
+
+        log('combination sent');
         combination.reverse().forEach(key =>
             this._virtualKeyboard.notify_keyval(
                 Clutter.get_current_event_time(), key, Clutter.KeyState.RELEASED
             ));
+        log('reverse sent')
     }
 
     // Move Mouse Pointer
@@ -1875,88 +1917,111 @@ class Manager {
             if (this._isOnOverview()) { // Ignore on overview
                 return;
             }
-
-            let ui = this._actionWidgets.show_desktop;
-
-            // Init indicator
-            if (!ui) {
-                let monitorArea = global.display.list_all_windows();
-                if (monitorArea.length > 0) {
-                    ui = [];
-                    for (var i = 0; i < monitorArea.length; i++) {
-                        if (!this._isWindowBlacklist(monitorArea[i])) {
-                            let aui = monitorArea[i].get_compositor_private();
-
-                            if (aui) {
-                                ui.push(aui);
-                                let mrect = monitorArea[i]
-                                    .get_work_area_current_monitor();
-                                let wrect = monitorArea[i].get_frame_rect();
-
-                                // black magic calc ;)
-                                let wl = (mrect.width / 32);
-                                aui._t_targetx = (mrect.width - wl) - wrect.x;
-                                var nx = (0 - (wrect.width - wl)) - wrect.x;
-                                aui.set_pivot_point(1.0, 0.5);
-                                if (Math.abs(nx) < Math.abs(aui._t_targetx)) {
-                                    aui._t_targetx = nx;
-                                    aui.set_pivot_point(1, (i % 5) * 0.25);
-                                }
-                                else {
-                                    aui.set_pivot_point(0, (i % 5) * 0.25);
-                                }
-                            }
-                        }
-                    }
-                    this._actionWidgets.show_desktop = ui;
-                }
-                else {
-                    this._actionWidgets.show_desktop = ui = -1;
-                }
+            if (!state || progress < 1.0) {
+                // Ignore if non end
+                return;
             }
-
-            // Execute Progress
-            if (ui && ui != -1) {
-                if (!state) {
-                    ui.forEach((aui) => {
-                        aui.opacity = 255 - Math.round(180 * progress);
-                        aui.scale_y =
-                            aui.scale_x = 1.0 - (progress * 0.6);
-                        aui.translation_x = (
-                            (progress * progress) * aui._t_targetx
-                        );
-                    });
-                }
-                else {
-                    // Action is executed
-                    if (progress >= 1.0) {
-                        // Show Desktop (Super+D)  Clutter.KEY_D
-                        this._sendKeyPress(this._showDesktopKeys);
-                    }
-
-                    ui.forEach((aui) => {
-                        aui.ease({
-                            duration: Math.round(250 * progress),
-                            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-                            opacity: 255,
-                            translation_x: 0,
-                            scale_x: 1,
-                            scale_y: 1,
-                            onStopped: () => {
-                                aui.set_pivot_point(0, 0);
-                                delete aui._t_targetx;
-                                delete aui._t_targety;
-                            }
-                        });
-                    });
-
-                    this._actionWidgets.show_desktop = ui = null;
-                }
-            } else if (state) {
-                this._actionWidgets.show_desktop = ui = null;
-            }
+            // Show Desktop
+            this._updateMutterSettings();
+            log(this._showDesktopKeys);
+            this._sendSyntheticEvent(this._showDesktopKeys);
 
         }
+        // else if (id == 3) {
+        //     //
+        //     // SHOW DESKTOP
+        //     //
+        //     if (this._isOnOverview()) { // Ignore on overview
+        //         return;
+        //     }
+
+        //     let ui = this._actionWidgets.show_desktop;
+
+        //     // Init indicator
+        //     if (!ui) {
+        //         let monitorArea = global.display.list_all_windows();
+        //         if (monitorArea.length > 0) {
+        //             ui = [];
+        //             for (var i = 0; i < monitorArea.length; i++) {
+        //                 if (!this._isWindowBlacklist(monitorArea[i])) {
+        //                     let aui = monitorArea[i].get_compositor_private();
+
+        //                     if (aui) {
+        //                         ui.push(aui);
+        //                         let mrect = monitorArea[i]
+        //                             .get_work_area_current_monitor();
+        //                         let wrect = monitorArea[i].get_frame_rect();
+
+        //                         // black magic calc ;)
+        //                         let wl = (mrect.width / 32);
+        //                         aui._t_targetx = (mrect.width - wl) - wrect.x;
+        //                         var nx = (0 - (wrect.width - wl)) - wrect.x;
+        //                         aui.set_pivot_point(1.0, 0.5);
+        //                         if (Math.abs(nx) < Math.abs(aui._t_targetx)) {
+        //                             aui._t_targetx = nx;
+        //                             aui.set_pivot_point(1, (i % 5) * 0.25);
+        //                         }
+        //                         else {
+        //                             aui.set_pivot_point(0, (i % 5) * 0.25);
+        //                         }
+        //                     }
+        //                 }
+        //             }
+        //             this._actionWidgets.show_desktop = ui;
+        //         }
+        //         else {
+        //             this._actionWidgets.show_desktop = ui = -1;
+        //         }
+        //     }
+
+        //     // Execute Progress
+        //     if (ui && ui != -1) {
+        //         if (!state) {
+        //             ui.forEach((aui) => {
+        //                 aui.opacity = 255 - Math.round(180 * progress);
+        //                 aui.scale_y =
+        //                     aui.scale_x = 1.0 - (progress * 0.6);
+        //                 aui.translation_x = (
+        //                     (progress * progress) * aui._t_targetx
+        //                 );
+        //             });
+        //         }
+        //         else {
+        //             // Action is executed
+        //             if (progress >= 1.0) {
+        //                 // Show Desktop (Super+D)  Clutter.KEY_D
+        //                 this._updateMutterSettings();
+        //                 log(this._showDesktopKeys);
+        //                 this._sendKeyPress(this._showDesktopKeys);
+        //                 this._actionWidgets.show_desktop = ui = null;
+        //                 return;
+        //             }
+
+        //             ui.forEach((aui) => {
+        //                 aui.ease({
+        //                     duration: Math.round(250 * progress),
+        //                     mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+        //                     opacity: 255,
+        //                     translation_x: 0,
+        //                     scale_x: 1,
+        //                     scale_y: 1,
+        //                     onStopped: () => {
+        //                         aui.set_pivot_point(0, 0);
+        //                         delete aui._t_targetx;
+        //                         delete aui._t_targety;
+        //                     }
+        //                 });
+        //             });
+
+        //             this._actionWidgets.show_desktop = ui = null;
+        //             log('Action completed')
+        //         }
+        //     } else if (state) {
+        //         this._actionWidgets.show_desktop = ui = null;
+        //     }
+        //     log('Action 2 completed')
+
+        // }
         else if ((id == 4) || (id == 5)) {
             //
             // NEXT & PREVIOUS WINDOW SWITCHING
