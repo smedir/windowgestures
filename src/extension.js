@@ -590,6 +590,7 @@ class Manager {
         } else {
             this._showDesktopKeys = this._extractKeys(showDesktopKeybinding);
         }
+        Main.wm.allowKeybinding(key, Shell.ActionMode.NORMAL);
         console.log(this._showDesktopKeys)
     }
 
